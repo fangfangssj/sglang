@@ -363,6 +363,29 @@ def _chunk_state_fwd_kernel(
     tl.store(states_ptrs, states, mask=c_mask)
 
 
+def _prune_chunk_state_varlen_configs(configs, named_args, **kwargs):
+    configs = prune_oversized_tiles(
+        {
+            "BLOCK_SIZE_M": ("hdim",),
+            "BLOCK_SIZE_N": ("dstate",),
+            "BLOCK_SIZE_K": ("chunk_size",),
+        }
+    )(configs, named_args, **kwargs)
+    x = named_args.get("x_ptr")
+    if x is not None and x.device.type == "npu":
+        # CANN 9.0 overflows UB for N=256 tiles and the 128x128 tile.
+        configs = [
+            config
+            for config in configs
+            if config.kwargs["BLOCK_SIZE_N"] <= 128
+            and not (
+                config.kwargs["BLOCK_SIZE_M"] >= 128
+                and config.kwargs["BLOCK_SIZE_N"] >= 128
+            )
+        ]
+    return configs
+
+
 @triton.autotune(
     configs=[
         # Small headdim/dstate configs (hdim<=64, dstate<=128) - increased parallelism
@@ -440,15 +463,7 @@ def _chunk_state_fwd_kernel(
         ),
     ],
     key=["hdim", "dstate", "chunk_size"],
-    prune_configs_by={
-        "early_config_prune": prune_oversized_tiles(
-            {
-                "BLOCK_SIZE_M": ("hdim",),
-                "BLOCK_SIZE_N": ("dstate",),
-                "BLOCK_SIZE_K": ("chunk_size",),
-            }
-        )
-    },
+    prune_configs_by={"early_config_prune": _prune_chunk_state_varlen_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -763,6 +778,8 @@ def chunk_state_varlen(
     _, ngroups, dstate = B.shape
     batch = cu_seqlens.shape[0] - 1
     cu_seqlens = cu_seqlens.contiguous()
+    if x.device.type == "npu" and not x.is_contiguous():
+        x = x.contiguous()
     assert nheads % ngroups == 0
     assert B.shape == (total_seqlen, ngroups, dstate)
     assert dt.shape == (nheads, nchunks, chunk_size)

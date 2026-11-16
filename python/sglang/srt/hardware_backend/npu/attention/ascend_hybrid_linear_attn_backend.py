@@ -11,6 +11,7 @@ from sgl_kernel_npu.mamba.mamba_state_update_triton import (
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
     HybridLinearAttnBackend,
+    Mamba2AttnBackend,
     MambaAttnBackendBase,
 )
 from sglang.srt.layers.attention.mamba.mamba2_metadata import (
@@ -18,6 +19,7 @@ from sglang.srt.layers.attention.mamba.mamba2_metadata import (
 )
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.runtime_context import get_exec
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
 
@@ -247,8 +249,26 @@ class AscendMambaAttnBackendBase(MambaAttnBackendBase):
         return 0  # Mamba attn does not use seq lens to index kv cache
 
 
-class AscendMamba2AttnBackend(AscendMambaAttnBackendBase):
-    pass
+class AscendMamba2AttnBackend(Mamba2AttnBackend, AscendMambaAttnBackendBase):
+    """Mamba2 execution with Ascend's state metadata and cache handling."""
+
+    def __init__(self, model_runner: ModelRunner):
+        # Ascend stores the conv window before channels; normalize the shape for
+        # shared Mamba cache tracking, which expects [..., channels, window].
+        AscendMambaAttnBackendBase.__init__(self, model_runner)
+        conv_state = self.state_pool.mamba_cache.conv[0]
+        self.conv_states_shape = torch.Size(
+            (*conv_state.shape[:-2], conv_state.shape[-1], conv_state.shape[-2])
+        )
+        if get_exec().mamba.enable_mamba_extra_buffer:
+            assert self.conv_states_shape[-1] < self.mamba_chunk_size, (
+                f"{self.conv_states_shape[-1]=} should be less than "
+                f"{self.mamba_chunk_size=}"
+            )
+            assert get_exec().mamba.mamba_track_interval >= self.mamba_chunk_size, (
+                f"mamba_track_interval ({get_exec().mamba.mamba_track_interval}) "
+                f"must be >= mamba_chunk_size ({self.mamba_chunk_size})"
+            )
 
 
 class AscendHybridLinearAttnBackend(HybridLinearAttnBackend):

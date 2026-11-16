@@ -33,6 +33,7 @@ from sglang.srt.layers.activation import ReLU2
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
     HybridLinearAttnBackend,
     Mamba2AttnBackend,
+    MambaAttnBackendBase,
 )
 from sglang.srt.layers.attention.mamba.mamba import MambaMixer2
 from sglang.srt.layers.dp_attention import (
@@ -92,6 +93,7 @@ from sglang.srt.utils import (
     LazyValue,
     get_current_device_stream_fast,
     is_cuda,
+    is_npu,
     is_sm120,
 )
 from sglang.srt.utils.custom_op import register_custom_op
@@ -654,14 +656,14 @@ class NemotronHMambaDecoderLayer(NemotronHAttnLikeDecoderLayer):
         """Core Mamba forward logic, called directly or via split op."""
         attn_backend = get_attn_backend()
         assert isinstance(attn_backend, HybridLinearAttnBackend)
-        assert isinstance(attn_backend.linear_attn_backend, Mamba2AttnBackend)
+        assert isinstance(attn_backend.linear_attn_backend, MambaAttnBackendBase)
         return attn_backend.linear_attn_backend.forward(
             mixer=self.mixer,
             layer_id=self.layer_id,
             hidden_states=hidden_states,
             output=None,
             forward_batch=forward_batch,
-            use_triton_causal_conv=True,
+            use_triton_causal_conv=not is_npu(),
         )
 
     def _forward_mixer(
