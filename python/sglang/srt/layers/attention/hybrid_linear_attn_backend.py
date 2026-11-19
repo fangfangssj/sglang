@@ -1185,7 +1185,9 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
-        self.conv_states_shape = self.state_pool.mamba_cache.conv[0].shape
+        self.conv_states_shape = self._mixer_conv_state(
+            self.state_pool.mamba_cache.conv[0]
+        ).shape
 
         if get_exec().mamba.enable_mamba_extra_buffer:
             assert self.conv_states_shape[-1] < self.mamba_chunk_size, (
@@ -1194,6 +1196,13 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
             assert get_exec().mamba.mamba_track_interval >= self.mamba_chunk_size, (
                 f"mamba_track_interval ({get_exec().mamba.mamba_track_interval}) must be >= mamba_chunk_size ({self.mamba_chunk_size})"
             )
+
+    def _mixer_conv_state(self, conv_state: torch.Tensor) -> torch.Tensor:
+        return conv_state
+
+    def _should_use_triton_causal_conv(self, requested: bool) -> bool:
+        # Only the stride-aware Triton convolution supports page-major state.
+        return requested or get_memory().enable_page_major_kv_layout
 
     def init_forward_metadata_out_graph(
         self,
@@ -1245,10 +1254,8 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
         use_triton_causal_conv: bool = False,
     ):
         assert isinstance(self.forward_metadata, Mamba2Metadata)
-        # Page-major stores state strided; only the stride-aware Triton causal-conv
-        # reads it (CUDA causal_conv1d garbles it). A model may also force Triton.
-        use_triton_causal_conv = (
-            use_triton_causal_conv or get_memory().enable_page_major_kv_layout
+        use_triton_causal_conv = self._should_use_triton_causal_conv(
+            use_triton_causal_conv
         )
         layer_cache = self.state_layer_cache(layer_id)
         mixer_out, intermediate_states, track_states = mixer.forward(
@@ -1258,6 +1265,7 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
             metadata=self.forward_metadata,
             mup_vector=mup_vector,
             use_triton_causal_conv=use_triton_causal_conv,
+            conv_state=self._mixer_conv_state(layer_cache.conv[0]),
         )
 
         if forward_batch.mamba_track_mask is not None:

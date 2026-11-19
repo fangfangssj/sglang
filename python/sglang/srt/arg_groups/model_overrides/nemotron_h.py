@@ -105,8 +105,9 @@ def _nemotron_h_overrides(server_args: Any, hf_config: Any) -> dict:
             "Use flashinfer_trtllm_routed as MoE runner backend on sm100 for "
             f"{model_arch} with EPLB or redundant experts"
         )
-    elif (is_modelopt or model_config.quantization is None) and (
-        cfg.moe_runner_backend == "auto"
+    elif cfg.moe_runner_backend == "auto" and (
+        is_modelopt
+        or (model_config.quantization is None and not get_platform().is_npu)
     ):
         if get_platform().is_sm100 and cfg.moe_a2a_backend == "none":
             overrides["moe_runner_backend"] = "flashinfer_trtllm"

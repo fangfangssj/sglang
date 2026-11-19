@@ -13,6 +13,7 @@ from sglang.srt.hardware_backend.npu.moe import standard_dispatch as ascend_disp
 from sglang.srt.hardware_backend.npu.moe.activation import (
     AllGatherActivationWrapper,
     NPUGeluAndMul,
+    NPUReLU2,
     NPUSitu,
     NPUSituMXFP8Quant,
     NPUSwiglu,
@@ -32,6 +33,7 @@ from sglang.srt.hardware_backend.npu.moe.routing import (
 )
 from sglang.srt.hardware_backend.npu.quantization.moe_methods import (
     NPUMXFP8MoEMethod,
+    NPUUnquantMoEMethod,
     NPUW4A8Int8MoEMethod,
     NPUW4A8MXFP4MoEMethod,
     NPUW8A8Int8MoEMethod,
@@ -202,6 +204,12 @@ class AscendRunnerCore(MoeRunnerCore):
             # 1. Choose the base activation according to the quant method
             if isinstance(kernel, (NPUW4A8Int8MoEMethod, NPUW8A8Int8MoEMethod)):
                 inner = NPUSwigluQuant()
+            elif (
+                config.activation == "relu2"
+                and not config.is_gated
+                and isinstance(kernel, NPUUnquantMoEMethod)
+            ):
+                inner = NPUReLU2()
             elif config.activation == "situ":
                 # Grouped SiTU (Kimi-K3). need_quant=False: the MXFP4 / BF16
                 # gmm2 requantizes the activations itself, so no quant is

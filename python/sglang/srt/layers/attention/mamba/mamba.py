@@ -453,6 +453,7 @@ class MambaMixer2(torch.nn.Module):
         metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
         use_triton_causal_conv: bool = False,
+        conv_state: Optional[torch.Tensor] = None,
     ):
         # Returns the projected result. When `output` is given it is also
         # written into that buffer (required by the cuda-graph split ops, which
@@ -463,12 +464,8 @@ class MambaMixer2(torch.nn.Module):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         state_indices_tensor = metadata.mamba_cache_indices
-        conv_state = layer_cache.conv[0]
-        if is_npu():
-            # Ascend's cache uses [slots, window, channels], while the shared
-            # causal-conv kernels consume [slots, channels, window]. Keep this
-            # as a view so kernel state updates still write through to the cache.
-            conv_state = conv_state.transpose(-1, -2)
+        if conv_state is None:
+            conv_state = layer_cache.conv[0]
         ssm_state = layer_cache.temporal
         intermediate_states = None
         track_states = None

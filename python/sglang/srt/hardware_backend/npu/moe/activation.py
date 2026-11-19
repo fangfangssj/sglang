@@ -185,6 +185,12 @@ class NPUSituMXFP8Quant(BaseActivation):
         )
 
 
+class NPUReLU2(BaseActivation):
+    def _apply_activation(self, hidden_states: torch.Tensor):
+        activated = F.relu(hidden_states)
+        return activated * activated, None
+
+
 class NPUGeluAndMul(BaseActivation):
     def __init__(self):
         from sglang.srt.layers.activation import GeluAndMul

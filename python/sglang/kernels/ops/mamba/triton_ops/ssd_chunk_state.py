@@ -363,15 +363,17 @@ def _chunk_state_fwd_kernel(
     tl.store(states_ptrs, states, mask=c_mask)
 
 
+_prune_oversized_chunk_state_varlen_tiles = prune_oversized_tiles(
+    {
+        "BLOCK_SIZE_M": ("hdim",),
+        "BLOCK_SIZE_N": ("dstate",),
+        "BLOCK_SIZE_K": ("chunk_size",),
+    }
+)
+
+
 def _prune_chunk_state_varlen_configs(configs, named_args, **kwargs):
-    configs = prune_oversized_tiles(
-        {
-            "BLOCK_SIZE_M": ("hdim",),
-            "BLOCK_SIZE_N": ("dstate",),
-            "BLOCK_SIZE_K": ("chunk_size",),
-        }
-    )(configs, named_args, **kwargs)
-    x = named_args.get("x_ptr")
+    x = named_args.get("x_ptr", kwargs.get("x_ptr"))
     if x is not None and x.device.type == "npu":
         # CANN 9.0 overflows UB for N=256 tiles and the 128x128 tile.
         configs = [
@@ -383,7 +385,7 @@ def _prune_chunk_state_varlen_configs(configs, named_args, **kwargs):
                 and config.kwargs["BLOCK_SIZE_N"] >= 128
             )
         ]
-    return configs
+    return _prune_oversized_chunk_state_varlen_tiles(configs, named_args, **kwargs)
 
 
 @triton.autotune(

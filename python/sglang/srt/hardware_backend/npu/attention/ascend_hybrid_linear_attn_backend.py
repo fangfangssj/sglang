@@ -19,7 +19,6 @@ from sglang.srt.layers.attention.mamba.mamba2_metadata import (
 )
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.runtime_context import get_exec
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
 
@@ -252,23 +251,12 @@ class AscendMambaAttnBackendBase(MambaAttnBackendBase):
 class AscendMamba2AttnBackend(Mamba2AttnBackend, AscendMambaAttnBackendBase):
     """Mamba2 execution with Ascend's state metadata and cache handling."""
 
-    def __init__(self, model_runner: ModelRunner):
-        # Ascend stores the conv window before channels; normalize the shape for
-        # shared Mamba cache tracking, which expects [..., channels, window].
-        AscendMambaAttnBackendBase.__init__(self, model_runner)
-        conv_state = self.state_pool.mamba_cache.conv[0]
-        self.conv_states_shape = torch.Size(
-            (*conv_state.shape[:-2], conv_state.shape[-1], conv_state.shape[-2])
-        )
-        if get_exec().mamba.enable_mamba_extra_buffer:
-            assert self.conv_states_shape[-1] < self.mamba_chunk_size, (
-                f"{self.conv_states_shape[-1]=} should be less than "
-                f"{self.mamba_chunk_size=}"
-            )
-            assert get_exec().mamba.mamba_track_interval >= self.mamba_chunk_size, (
-                f"mamba_track_interval ({get_exec().mamba.mamba_track_interval}) "
-                f"must be >= mamba_chunk_size ({self.mamba_chunk_size})"
-            )
+    def _mixer_conv_state(self, conv_state: torch.Tensor) -> torch.Tensor:
+        """View Ascend's convolution cache as [slots, channels, window]."""
+        return conv_state.transpose(-1, -2)
+
+    def _should_use_triton_causal_conv(self, requested: bool) -> bool:
+        return False
 
 
 class AscendHybridLinearAttnBackend(HybridLinearAttnBackend):
