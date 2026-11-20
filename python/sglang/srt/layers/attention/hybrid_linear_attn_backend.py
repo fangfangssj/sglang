@@ -1182,6 +1182,7 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
     """Attention backend wrapper for Mamba2Mixer kernels."""
 
     needs_cpu_seq_lens: bool = False
+    verify_causal_conv = None
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
@@ -1266,6 +1267,7 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
             mup_vector=mup_vector,
             use_triton_causal_conv=use_triton_causal_conv,
             conv_state=self._mixer_conv_state(layer_cache.conv[0]),
+            verify_causal_conv=self.verify_causal_conv,
         )
 
         if forward_batch.mamba_track_mask is not None:

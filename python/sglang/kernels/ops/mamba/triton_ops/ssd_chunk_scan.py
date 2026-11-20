@@ -14,6 +14,7 @@ import triton.language as tl
 from packaging import version
 
 from .autotune import autotune_cache_kwargs, prune_oversized_tiles
+from .ssd_chunk_state import _load_ssd_state
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
@@ -234,6 +235,7 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
     HAS_INITSTATES: tl.constexpr,
+    IS_NPU: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr = 16,
     BLOCK_SIZE_N: tl.constexpr = 16,
     BLOCK_SIZE_K: tl.constexpr = 16,
@@ -285,6 +287,8 @@ def _chunk_scan_fwd_kernel(
     )
     prev_states_hdim = stride_states_hdim
     prev_states_dstate = stride_states_dstate
+    use_initial_states = False
+    init_state_seq_idx = 0
 
     chunk_size_limit = min(chunk_size, seqlen - c_idx * chunk_size)
     if HAS_SEQ_IDX:
@@ -318,14 +322,18 @@ def _chunk_scan_fwd_kernel(
                     )  # if a seq is changed exactly on boundary
                     or (c_off > 0)  # implies a new example (pseudo chunk)
                 ):
-                    # - replace prev_states_ptr with init_states
-                    prev_states_ptr = (
-                        initstates_ptr
-                        + seq_idx_m * stride_init_states_batch
-                        + pid_h * stride_init_states_head
-                    )
-                    prev_states_hdim = stride_init_states_hdim  # override strides
-                    prev_states_dstate = stride_init_states_dstate
+                    if IS_NPU:
+                        use_initial_states = True
+                        init_state_seq_idx = seq_idx_m
+                    else:
+                        # - replace prev_states_ptr with init_states
+                        prev_states_ptr = (
+                            initstates_ptr
+                            + seq_idx_m * stride_init_states_batch
+                            + pid_h * stride_init_states_head
+                        )
+                        prev_states_hdim = stride_init_states_hdim  # override strides
+                        prev_states_dstate = stride_init_states_dstate
 
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     dA_cs_m = tl.load(
@@ -403,6 +411,16 @@ def _chunk_scan_fwd_kernel(
             offs_n[None, :] * prev_states_hdim
             + offs_k_dstate[:, None] * prev_states_dstate
         )
+        if IS_NPU and HAS_INITSTATES:
+            initstates_ptrs = (
+                initstates_ptr
+                + init_state_seq_idx * stride_init_states_batch
+                + pid_h * stride_init_states_head
+                + offs_n[None, :] * stride_init_states_hdim
+                + offs_k_dstate[:, None] * stride_init_states_dstate
+            )
+        else:
+            initstates_ptrs = prev_states_ptrs
         if HAS_SEQ_IDX:
             if not HAS_INITSTATES:
                 # - this is for continuous batching where there is no init states
@@ -421,10 +439,12 @@ def _chunk_scan_fwd_kernel(
                 other=0.0,
             )
 
-            prev_states = tl.load(
+            prev_states = _load_ssd_state(
                 prev_states_ptrs,
-                mask=(offs_k_dstate[:, None] < dstate) & (offs_n[None, :] < hdim),
-                other=0.0,
+                initstates_ptrs,
+                (offs_k_dstate[:, None] < dstate) & (offs_n[None, :] < hdim),
+                use_initial_states,
+                IS_NPU and HAS_INITSTATES,
             )
             prev_states = prev_states.to(C_ptr.dtype.element_ty)
             acc = tl.dot(C, prev_states) * scale_m[:, None]
@@ -437,16 +457,20 @@ def _chunk_scan_fwd_kernel(
                     other=0.0,
                 )
                 # C = (C * scale_m[:, None]).to(C_ptr.dtype.element_ty)
-                prev_states = tl.load(
+                prev_states = _load_ssd_state(
                     prev_states_ptrs,
-                    mask=(offs_k_dstate[:, None] < dstate - k)
+                    initstates_ptrs,
+                    (offs_k_dstate[:, None] < dstate - k)
                     & (offs_n[None, :] < hdim),
-                    other=0.0,
+                    use_initial_states,
+                    IS_NPU and HAS_INITSTATES,
                 )
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 acc += tl.dot(C, prev_states)
                 C_ptrs += BLOCK_SIZE_K
                 prev_states_ptrs += BLOCK_SIZE_K
+                if IS_NPU and HAS_INITSTATES:
+                    initstates_ptrs += BLOCK_SIZE_K * stride_init_states_dstate
             acc *= scale_m[:, None]
 
     offs_k = tl.arange(0, BLOCK_SIZE_K) + c_off
@@ -696,5 +720,6 @@ def _chunk_scan_fwd(
         HAS_SEQ_IDX=seq_idx is not None,
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
+        IS_NPU=x.device.type == "npu",
     )
     return out_x

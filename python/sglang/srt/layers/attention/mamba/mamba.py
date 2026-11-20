@@ -454,6 +454,7 @@ class MambaMixer2(torch.nn.Module):
         mup_vector: Optional[torch.Tensor] = None,
         use_triton_causal_conv: bool = False,
         conv_state: Optional[torch.Tensor] = None,
+        verify_causal_conv: Optional[Callable[..., torch.Tensor]] = None,
     ):
         # Returns the projected result. When `output` is given it is also
         # written into that buffer (required by the cuda-graph split ops, which
@@ -652,9 +653,6 @@ class MambaMixer2(torch.nn.Module):
 
             # 2. Convolution sequence transformation
             if is_target_verify:
-                assert use_triton_causal_conv, (
-                    "Speculative decoding requires use_triton_causal_conv=True for intermediate state support"
-                )
                 assert isinstance(layer_cache, MambaPool.SpeculativeState), (
                     "layer_cache must be SpeculativeState for speculative decoding"
                 )
@@ -663,27 +661,40 @@ class MambaMixer2(torch.nn.Module):
                     num_decodes, dtype=torch.int32, device=state_indices_tensor_d.device
                 )
 
-                # Reshape for batch processing
-                hidden_states_B_C_d_reshaped = hidden_states_B_C_d.view(
-                    num_decodes, draft_token_num, -1
-                ).transpose(1, 2)
+                if verify_causal_conv is not None:
+                    hidden_states_B_C_d = verify_causal_conv(
+                        hidden_states_B_C_d,
+                        layer_cache.conv[0],
+                        conv_weights,
+                        self.conv1d.bias,
+                        self.activation,
+                        metadata,
+                    )
+                else:
+                    assert use_triton_causal_conv, (
+                        "Speculative decoding requires use_triton_causal_conv=True for intermediate state support"
+                    )
+                    # Reshape for batch processing
+                    hidden_states_B_C_d_reshaped = hidden_states_B_C_d.view(
+                        num_decodes, draft_token_num, -1
+                    ).transpose(1, 2)
 
-                hidden_states_B_C_d_processed = causal_conv1d_update_triton(
-                    hidden_states_B_C_d_reshaped,
-                    conv_state,
-                    conv_weights,
-                    self.conv1d.bias,
-                    self.activation,
-                    conv_state_indices=state_indices_tensor_d[:num_decodes],
-                    intermediate_conv_window=layer_cache.intermediate_conv_window[0],
-                    intermediate_state_indices=self.intermediate_state_indices,
-                    retrieve_next_token=metadata.retrieve_next_token,
-                    retrieve_next_sibling=metadata.retrieve_next_sibling,
-                    retrieve_parent_token=metadata.retrieve_parent_token,
-                )
-                hidden_states_B_C_d = hidden_states_B_C_d_processed.transpose(
-                    1, 2
-                ).view(num_decode_tokens, -1)
+                    hidden_states_B_C_d_processed = causal_conv1d_update_triton(
+                        hidden_states_B_C_d_reshaped,
+                        conv_state,
+                        conv_weights,
+                        self.conv1d.bias,
+                        self.activation,
+                        conv_state_indices=state_indices_tensor_d[:num_decodes],
+                        intermediate_conv_window=layer_cache.intermediate_conv_window[0],
+                        intermediate_state_indices=self.intermediate_state_indices,
+                        retrieve_next_token=metadata.retrieve_next_token,
+                        retrieve_next_sibling=metadata.retrieve_next_sibling,
+                        retrieve_parent_token=metadata.retrieve_parent_token,
+                    )
+                    hidden_states_B_C_d = hidden_states_B_C_d_processed.transpose(
+                        1, 2
+                    ).view(num_decode_tokens, -1)
             else:
                 ccu = (
                     causal_conv1d_update

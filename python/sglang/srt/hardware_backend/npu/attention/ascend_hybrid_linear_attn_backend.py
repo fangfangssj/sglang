@@ -8,6 +8,7 @@ from sgl_kernel_npu.mamba.mamba_state_update_triton import (
     move_intermediate_cache,
 )
 
+from sglang.srt.configs.hybrid_arch import mamba2_config
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
     HybridLinearAttnBackend,
@@ -16,6 +17,7 @@ from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
 )
 from sglang.srt.layers.attention.mamba.mamba2_metadata import (
     ForwardMetadata,
+    Mamba2Metadata,
 )
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
@@ -251,9 +253,42 @@ class AscendMambaAttnBackendBase(MambaAttnBackendBase):
 class AscendMamba2AttnBackend(Mamba2AttnBackend, AscendMambaAttnBackendBase):
     """Mamba2 execution with Ascend's state metadata and cache handling."""
 
+    def __init__(self, model_runner: ModelRunner):
+        config = mamba2_config(model_runner.model_config)
+        self.conv_history_len = config.mamba2_cache_params.shape.conv_kernel - 1
+        super().__init__(model_runner)
+
     def _mixer_conv_state(self, conv_state: torch.Tensor) -> torch.Tensor:
-        """View Ascend's convolution cache as [slots, channels, window]."""
-        return conv_state.transpose(-1, -2)
+        """Expose only the committed history to prefill and ordinary decode."""
+        return conv_state[..., -self.conv_history_len :, :].transpose(-1, -2)
+
+    def verify_causal_conv(
+        self,
+        x: torch.Tensor,
+        conv_state: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        activation: str,
+        metadata: Mamba2Metadata,
+    ) -> torch.Tensor:
+        if self.topk > 1:
+            raise NotImplementedError("Ascend Mamba2 verify requires a linear draft chain")
+        if activation not in ("silu", "swish", None):
+            raise NotImplementedError(f"Unsupported Ascend Mamba2 activation: {activation}")
+        cache_indices = metadata.mamba_cache_indices[: metadata.num_decodes]
+        num_accepted_tokens = torch.full_like(cache_indices, metadata.draft_token_num)
+        return torch.ops.npu.causal_conv1d(
+            x.contiguous(),
+            weight.transpose(0, 1).contiguous(),
+            conv_states=conv_state,
+            bias=bias,
+            query_start_loc=metadata.query_start_loc,
+            cache_indices=cache_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            activation_mode=int(activation is not None),
+            pad_slot_id=self.pad_slot_id,
+            run_mode=1,
+        )
 
     def _should_use_triton_causal_conv(self, requested: bool) -> bool:
         return False

@@ -167,6 +167,12 @@ class AscendRunnerCore(MoeRunnerCore):
             and config.swiglu_limit > 0
         ):
             self.activation = NPUSwigluWithLimit(config.swiglu_limit)
+        elif (
+            config.activation == "relu2"
+            and not config.is_gated
+            and isinstance(kernel, NPUUnquantMoEMethod)
+        ):
+            self.activation = NPUReLU2()
         elif get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_ascend_ops():
             # DeepEP / Ascend Ops path: the dispatcher hands over tokens grouped
             # by expert, so use a unified kernel that decides quantisation.
@@ -204,12 +210,6 @@ class AscendRunnerCore(MoeRunnerCore):
             # 1. Choose the base activation according to the quant method
             if isinstance(kernel, (NPUW4A8Int8MoEMethod, NPUW8A8Int8MoEMethod)):
                 inner = NPUSwigluQuant()
-            elif (
-                config.activation == "relu2"
-                and not config.is_gated
-                and isinstance(kernel, NPUUnquantMoEMethod)
-            ):
-                inner = NPUReLU2()
             elif config.activation == "situ":
                 # Grouped SiTU (Kimi-K3). need_quant=False: the MXFP4 / BF16
                 # gmm2 requantizes the activations itself, so no quant is
